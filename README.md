@@ -24,7 +24,7 @@ The address will normally be:
 https://YOUR-GITHUB-USERNAME.github.io/HydroRain/
 ```
 
-Students can open that address without a GitHub account and without installing
+You can open that address without a GitHub account and without installing
 anything.
 
 ## Expected rain-gauge CSV
