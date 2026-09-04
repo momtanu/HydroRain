@@ -1,14 +1,16 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
   area, bbox, booleanPointInPolygon, buffer, convex, featureCollection,
-  intersect, isolines, point, polygon, voronoi,
+  intersect, isolines, kinks, point, polygon, voronoi,
 } from "@turf/turf";
 import type { Feature, FeatureCollection, MultiPolygon, Point, Polygon } from "geojson";
 import {
-  BookOpen, CheckCircle2, Download, FileUp, FlaskConical,
-  RotateCcw, TriangleAlert, Upload,
+  Baseline, BookOpen, CheckCircle2, Download, FileUp, FlaskConical,
+  Map, MapPin, MousePointer2, Pencil, Plus, RotateCcw, Save,
+  Trash2, TriangleAlert, Undo2, Upload,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -32,6 +34,11 @@ type Analysis = {
   thiessenRows: ThiessenRow[]; isohyetRows: IsohyetRow[];
   grid: GridPoint[]; contourLines: FeatureCollection; levels: number[];
   bounds: [number, number, number, number]; watershedAreaKm2: number;
+};
+type EditMode = "move" | "add" | "draw";
+type BaselineSnapshot = {
+  gaugeCount: number; watershedAreaKm2: number;
+  arithmetic: number; thiessen: number; isohyetal: number;
 };
 
 const SAMPLE_GAUGES: Gauge[] = [
@@ -242,12 +249,81 @@ function MapPanel({ mode, gauges, watershed, analysis }: {
   </div>;
 }
 
+function InteractiveMapPanel({
+  gauges, watershed, analysis, editMode, selectedStation, drawingVertices,
+  onSelectGauge, onMoveGauge, onMapClick,
+}: {
+  gauges: Gauge[]; watershed: Feature<Polygon | MultiPolygon>; analysis: Analysis;
+  editMode: EditMode; selectedStation: string | null; drawingVertices: number[][];
+  onSelectGauge: (station: string) => void;
+  onMoveGauge: (station: string, coordinate: number[]) => void;
+  onMapClick: (coordinate: number[]) => void;
+}) {
+  const width = 620, height = 430, margin = 25;
+  const [minX, minY, maxX, maxY] = analysis.bounds;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const project = (coordinate: number[]): [number, number] => [
+    margin + ((coordinate[0]-minX)/(maxX-minX))*(width-margin*2),
+    height-margin-((coordinate[1]-minY)/(maxY-minY))*(height-margin*2),
+  ];
+  const unproject = (clientX: number, clientY: number) => {
+    const rect = svgRef.current!.getBoundingClientRect();
+    const sx = (clientX-rect.left)/rect.width*width;
+    const sy = (clientY-rect.top)/rect.height*height;
+    return [
+      minX + ((Math.max(margin,Math.min(width-margin,sx))-margin)/(width-margin*2))*(maxX-minX),
+      maxY - ((Math.max(margin,Math.min(height-margin,sy))-margin)/(height-margin*2))*(maxY-minY),
+    ];
+  };
+  const drawingPath = drawingVertices.map((coordinate,index)=>{
+    const [x,y]=project(coordinate); return (index===0?"M":"L")+x+","+y;
+  }).join(" ");
+  const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (dragging) onMoveGauge(dragging, unproject(event.clientX,event.clientY));
+  };
+  const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (!dragging) return;
+    if (svgRef.current?.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId);
+    setDragging(null);
+  };
+  const handleMapClick = (event: ReactMouseEvent<SVGSVGElement>) => {
+    if (!dragging && editMode!=="move") onMapClick(unproject(event.clientX,event.clientY));
+  };
+  return <div className={"map-shell map-"+editMode}>
+    <svg ref={svgRef} viewBox={"0 0 "+width+" "+height} role="img" aria-label="Editable gauge and watershed map"
+      onClick={handleMapClick} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
+      <rect width={width} height={height} className="map-background" rx="18"/>
+      {geometryPaths(watershed, project).map((d,i)=><path d={d} className="watershed-outline editable" key={i}/>)}
+      {drawingVertices.length>0 && <g className="drawing-layer">
+        {drawingVertices.length>=3 && <path d={drawingPath+" Z"} className="drawing-fill"/>}
+        <path d={drawingPath} className="drawing-line"/>
+        {drawingVertices.map((coordinate,index)=>{const [x,y]=project(coordinate);return <g key={index}><circle cx={x} cy={y} r="6" className="drawing-vertex"/><text x={x+9} y={y-7} className="drawing-number">{index+1}</text></g>;})}
+      </g>}
+      {gauges.map((g)=>{
+        const [x,y]=project([g.longitude,g.latitude]); const selected=selectedStation===g.station;
+        return <g key={g.station} className={"gauge-group"+(selected?" selected":"")+(editMode==="move"?" draggable":"")}
+          onClick={(event)=>{event.stopPropagation();onSelectGauge(g.station);}}
+          onPointerDown={(event)=>{
+            if(editMode!=="move")return;
+            event.preventDefault();event.stopPropagation();setDragging(g.station);onSelectGauge(g.station);svgRef.current?.setPointerCapture(event.pointerId);
+          }}>
+          <circle cx={x} cy={y} r="13" className="gauge-hit-area"/>
+          <circle cx={x} cy={y} r="6" className="gauge-dot"/>
+          <text x={x+9} y={y-8} className="gauge-label">{g.station+" · "+formatNumber(g.rainfall,0)+" mm"}</text>
+        </g>;
+      })}
+    </svg>
+    <div className="map-coordinate-note">Drag gauges only in Move mode. Click the map in Add or Draw mode.</div>
+  </div>;
+}
+
 function downloadText(filename: string, contents: string, type: string) {
   const blob = new Blob([contents], { type }); const href = URL.createObjectURL(blob);
   const anchor = document.createElement("a"); anchor.href = href; anchor.download = filename; anchor.click(); URL.revokeObjectURL(href);
 }
 
-export function HydroRainApp() {
+function LegacyHydroRainApp() {
   const [gauges, setGauges] = useState(SAMPLE_GAUGES);
   const [uploadedBoundary, setUploadedBoundary] = useState<Feature<Polygon | MultiPolygon> | null>(SAMPLE_WATERSHED);
   const [dataName, setDataName] = useState("Demonstration storm");
@@ -298,6 +374,171 @@ export function HydroRainApp() {
         <div className="details-grid"><DataTable title="Thiessen calculation" eyebrow="Area weights" formula="P̄ = Σ(Aᵢ/A)Pᵢ" headings={["Gauge","Rainfall","Area","Weight","Contribution"]} rows={analysis.thiessenRows.map(r=>[r.station,`${formatNumber(r.rainfall,1)} mm`,`${formatNumber(r.areaKm2,2)} km²`,`${formatNumber(r.fraction*100,1)}%`,`${formatNumber(r.weighted,2)} mm`])}/><DataTable title="Isohyetal calculation" eyebrow="Contour bands" formula="P̄ = Σ(Aⱼ/A)P̄ⱼ" headings={["Band","Representative","Area","Weight","Contribution"]} rows={analysis.isohyetRows.map(r=>[`${r.lower}–${r.upper} mm`,`${formatNumber(r.representative,1)} mm`,`${formatNumber(r.areaKm2,2)} km²`,`${formatNumber(r.fraction*100,1)}%`,`${formatNumber(r.weighted,2)} mm`])}/></div>
         <footer className="analysis-footer"><FlaskConical/><span>Watershed area: <b>{formatNumber(analysis.watershedAreaKm2,2)} km²</b>. Isohyetal areas are grid approximations; report the grid, interval, and IDW power with your result.</span></footer>
       </> : <div className="error-state"><TriangleAlert/><h2>Analysis could not be completed</h2><p>{analysisResult.error}</p><Button onClick={reset}>Restore sample data</Button></div>}</section>
+    </div>
+  </main>;
+}
+
+function formatDelta(value: number, digits = 2, suffix = " mm") {
+  const sign = value > 0 ? "+" : "";
+  return sign + value.toFixed(digits) + suffix;
+}
+
+function snapshot(analysis: Analysis, gaugeCount: number): BaselineSnapshot {
+  return {
+    gaugeCount, watershedAreaKm2: analysis.watershedAreaKm2,
+    arithmetic: analysis.arithmetic, thiessen: analysis.thiessen, isohyetal: analysis.isohyetal,
+  };
+}
+
+function nextGaugeId(gauges: Gauge[]) {
+  const names = new Set(gauges.map((gauge)=>gauge.station));
+  let index=1; while(names.has("G"+index)) index+=1;
+  return "G"+index;
+}
+
+function ComparisonMetric({label,current,delta}:{label:string;current:string;delta:string}) {
+  const number=Number(delta.replace(/[^\d.-]/g,""));
+  const kind=number>0?"positive":number<0?"negative":"zero";
+  return <div className="comparison-metric"><span>{label}</span><strong>{current}</strong><small className={kind}>{"Δ "+delta}</small></div>;
+}
+
+export function HydroRainApp() {
+  const [gauges,setGauges]=useState(SAMPLE_GAUGES);
+  const [boundary,setBoundary]=useState<Feature<Polygon|MultiPolygon>>(SAMPLE_WATERSHED);
+  const [dataName,setDataName]=useState("Demonstration storm");
+  const [boundaryName,setBoundaryName]=useState("Included watershed");
+  const [power,setPower]=useState(2),[interval,setInterval]=useState(10),[resolution,setResolution]=useState(72);
+  const [status,setStatus]=useState<{type:"ok"|"error";text:string}>({type:"ok",text:"Sample loaded. Save a baseline, then change one thing."});
+  const [activeTab,setActiveTab]=useState("gauges");
+  const [editMode,setEditMode]=useState<EditMode>("move");
+  const [selectedStation,setSelectedStation]=useState<string|null>(null);
+  const [newRainfall,setNewRainfall]=useState(80);
+  const [drawingVertices,setDrawingVertices]=useState<number[][]>([]);
+  const [baseline,setBaseline]=useState<BaselineSnapshot|null>(null);
+  const analysisResult=useMemo(()=>{try{return{analysis:runAnalysis(gauges,boundary,power,interval,resolution),error:""};}catch(error){return{analysis:null,error:error instanceof Error?error.message:"Analysis failed."};}},[gauges,boundary,power,interval,resolution]);
+  const analysis=analysisResult.analysis;
+  const selectedGauge=gauges.find((gauge)=>gauge.station===selectedStation)??null;
+
+  useEffect(()=>{if(!baseline&&analysis)setBaseline(snapshot(analysis,gauges.length));},[analysis,baseline,gauges.length]);
+
+  const handleGaugeUpload=async(event:ChangeEvent<HTMLInputElement>)=>{
+    const file=event.target.files?.[0];if(!file)return;
+    try{
+      const parsed=parseCsv(await file.text());
+      setGauges(parsed);setBoundary(automaticBoundary(parsed));setDataName(file.name);setBoundaryName("Automatic boundary fixed at upload");
+      setSelectedStation(null);setDrawingVertices([]);setBaseline(null);setActiveTab("gauges");
+      setStatus({type:"ok",text:parsed.length+" gauges loaded. The watershed is fixed so you can test gauge placement."});
+    }catch(error){setStatus({type:"error",text:error instanceof Error?error.message:"CSV upload failed."});}
+  };
+  const handleBoundaryUpload=async(event:ChangeEvent<HTMLInputElement>)=>{
+    const file=event.target.files?.[0];if(!file)return;
+    try{
+      setBoundary(findWatershed(JSON.parse(await file.text())));setBoundaryName(file.name);setDrawingVertices([]);setBaseline(null);
+      setStatus({type:"ok",text:"Watershed loaded and recorded as a new baseline."});
+    }catch(error){setStatus({type:"error",text:error instanceof Error?error.message:"GeoJSON upload failed."});}
+  };
+  const reset=()=>{
+    setGauges(SAMPLE_GAUGES);setBoundary(SAMPLE_WATERSHED);setDataName("Demonstration storm");setBoundaryName("Included watershed");
+    setPower(2);setInterval(10);setResolution(72);setSelectedStation(null);setDrawingVertices([]);setBaseline(null);setEditMode("move");setActiveTab("gauges");
+    setStatus({type:"ok",text:"Sample restored and recorded as a new baseline."});
+  };
+  const chooseTool=(mode:EditMode)=>{
+    if(mode==="draw"&&editMode!=="draw")setDrawingVertices([]);
+    if(mode!=="draw")setDrawingVertices([]);
+    setEditMode(mode);setSelectedStation(null);setActiveTab("gauges");
+    setStatus({type:"ok",text:mode==="move"?"Drag an orange gauge. Click it to edit its rainfall.":mode==="add"?"Set rainfall, then click the map to add a gauge.":"Click watershed vertices in order, then choose Finish watershed."});
+  };
+  const handleMapClick=(coordinate:number[])=>{
+    if(editMode==="add"){
+      const station=nextGaugeId(gauges);
+      setGauges((current)=>[...current,{station,longitude:coordinate[0],latitude:coordinate[1],rainfall:newRainfall}]);
+      setSelectedStation(station);setStatus({type:"ok",text:station+" added at "+newRainfall+" mm. Compare the Δ values."});
+    }else if(editMode==="draw"){
+      setDrawingVertices((current)=>[...current,coordinate]);
+      setStatus({type:"ok",text:"Vertex "+(drawingVertices.length+1)+" added. Use at least three vertices."});
+    }
+  };
+  const moveGauge=(station:string,coordinate:number[])=>{
+    setGauges((current)=>current.map((gauge)=>gauge.station===station?{...gauge,longitude:coordinate[0],latitude:coordinate[1]}:gauge));
+  };
+  const updateRainfall=(value:number)=>{
+    if(!selectedStation||!Number.isFinite(value)||value<0)return;
+    setGauges((current)=>current.map((gauge)=>gauge.station===selectedStation?{...gauge,rainfall:value}:gauge));
+  };
+  const removeGauge=()=>{
+    if(!selectedStation)return;
+    if(gauges.length<=3){setStatus({type:"error",text:"Keep at least three gauges for spatial analysis."});return;}
+    const removed=selectedStation;setGauges((current)=>current.filter((gauge)=>gauge.station!==removed));setSelectedStation(null);
+    setStatus({type:"ok",text:removed+" removed. Notice which method changes most."});
+  };
+  const finishWatershed=()=>{
+    if(drawingVertices.length<3){setStatus({type:"error",text:"Add at least three vertices."});return;}
+    const drawn=polygon([[...drawingVertices,drawingVertices[0]]]);
+    if(area(drawn)<1000){setStatus({type:"error",text:"The watershed is too small. Spread the vertices farther apart."});return;}
+    if(kinks(drawn).features.length>0){setStatus({type:"error",text:"The outline crosses itself. Undo vertices and try again."});return;}
+    setBoundary(drawn);setBoundaryName("Watershed drawn on map");setDrawingVertices([]);setEditMode("move");
+    setStatus({type:"ok",text:"New watershed saved. Click Set current as baseline before testing gauges."});
+  };
+  const explanation=useMemo(()=>{
+    if(!analysis||!baseline)return"";
+    const count=gauges.length-baseline.gaugeCount,areaDelta=analysis.watershedAreaKm2-baseline.watershedAreaKm2;
+    if(Math.abs(areaDelta)>.01)return"You changed the watershed. All spatial weights were recalculated for the new study area.";
+    if(count>0)return"Adding a gauge changes the arithmetic mean through one new equal-weight value. It also changes Thiessen areas and the IDW surface, so the methods need not change equally.";
+    if(count<0)return"Removing a gauge creates a larger unsampled region. The remaining gauges gain more spatial influence.";
+    if(Math.abs(analysis.arithmetic-baseline.arithmetic)<.005)return"The arithmetic mean stayed constant because gauge rainfall values stayed fixed. Thiessen and isohyetal estimates can still change because location controls spatial influence.";
+    return"Changing a rainfall value affects its equal-weight mean, Thiessen contribution, and surrounding interpolated surface differently.";
+  },[analysis,baseline,gauges.length]);
+  const downloadTemplate=()=>downloadText("hydrorain-gauge-template.csv","station,latitude,longitude,rainfall_mm\nG1,36.035,-79.865,64\nG2,36.095,-79.825,78\nG3,36.145,-79.760,96\n","text/csv;charset=utf-8");
+  const downloadResults=()=>{
+    if(!analysis)return;
+    const lines=["HYDRORAIN METHOD COMPARISON","method,watershed_average_mm","Arithmetic mean,"+analysis.arithmetic.toFixed(4),"Thiessen polygon,"+analysis.thiessen.toFixed(4),"Isohyetal,"+analysis.isohyetal.toFixed(4),"","THIESSEN WEIGHTS","station,rainfall_mm,area_km2,area_fraction,weighted_rainfall_mm",...analysis.thiessenRows.map((row)=>[row.station,row.rainfall,row.areaKm2,row.fraction,row.weighted].map(escapeCsv).join(",")),"","ISOHYETAL BANDS","lower_mm,upper_mm,representative_mm,area_km2,area_fraction,weighted_rainfall_mm",...analysis.isohyetRows.map((row)=>[row.lower,row.upper,row.representative,row.areaKm2,row.fraction,row.weighted].map(escapeCsv).join(",")),"","SETTINGS","gauge_file,"+escapeCsv(dataName),"watershed,"+escapeCsv(boundaryName),"idw_power,"+power,"grid_resolution,"+resolution,"isohyet_interval_mm,"+interval];
+    downloadText("hydrorain-results.csv",lines.join("\n"),"text/csv;charset=utf-8");
+  };
+
+  return <main className="app-frame">
+    <header className="topbar"><div className="brand-mark" aria-hidden="true"><span/><span/><span/></div><div><p className="eyebrow">Interactive watershed precipitation laboratory</p><h1>HydroRain</h1></div><div className="header-actions"><Button variant="ghost" onClick={downloadTemplate}><Download/> CSV template</Button><Button variant="outline" onClick={reset}><RotateCcw/> Reset sample</Button></div></header>
+    <div className="workspace">
+      <aside className="control-panel">
+        <section><div className="section-heading"><span>01</span><div><h2>Start with data</h2><p>Use the sample or upload your own.</p></div></div>
+          <label className="upload-card" htmlFor="gauge-upload"><FileUp/><span><strong>Rain-gauge CSV</strong><small>{dataName}</small></span><Upload/></label><Input id="gauge-upload" className="sr-only" type="file" accept=".csv,text/csv" onChange={handleGaugeUpload}/>
+          <label className="upload-card" htmlFor="boundary-upload"><FileUp/><span><strong>Watershed GeoJSON</strong><small>{boundaryName}</small></span><Upload/></label><Input id="boundary-upload" className="sr-only" type="file" accept=".geojson,.json,application/geo+json,application/json" onChange={handleBoundaryUpload}/>
+          <div className={"status-message "+status.type}>{status.type==="ok"?<CheckCircle2/>:<TriangleAlert/>}<span>{status.text}</span></div>
+        </section>
+        <section><div className="section-heading"><span>02</span><div><h2>Run an experiment</h2><p>Change one thing at a time.</p></div></div>
+          <ol className="experiment-steps"><li><b>Save a baseline</b><span>Record the starting estimates.</span></li><li><b>Edit the map</b><span>Add, move, edit, or remove a gauge.</span></li><li><b>Explain the Δ</b><span>Compare methods and spatial weights.</span></li></ol>
+        </section>
+        <section><div className="section-heading"><span>03</span><div><h2>Test assumptions</h2><p>Change interpolation settings.</p></div></div>
+          <div className="control-group"><div className="control-label"><label htmlFor="idw-power">IDW power</label><output>{power.toFixed(1)}</output></div><Slider id="idw-power" min={.5} max={5} step={.5} value={[power]} onValueChange={(value)=>setPower(value[0])}/></div>
+          <div className="control-group"><div className="control-label"><label>Grid resolution</label><output>{resolution+" × adaptive"}</output></div><Slider min={45} max={110} step={5} value={[resolution]} onValueChange={(value)=>setResolution(value[0])}/></div>
+          <div className="control-group"><label>Isohyet interval</label><Select value={String(interval)} onValueChange={(value)=>setInterval(Number(value))}><SelectTrigger className="w-full"><SelectValue/></SelectTrigger><SelectContent>{[2,5,10,15,20,25].map((value)=><SelectItem key={value} value={String(value)}>{value+" mm"}</SelectItem>)}</SelectContent></Select></div>
+        </section>
+        <div className="method-note"><BookOpen/><p>Keep rainfall values fixed while moving gauges to isolate the effect of location. Then change one rainfall value and compare again.</p></div>
+      </aside>
+      <section className="results-panel">{analysis?<>
+        <div className="result-heading"><div><p className="eyebrow">{"Current experiment · "+gauges.length+" gauges"}</p><h2>Watershed-average precipitation</h2></div><Button onClick={downloadResults}><Download/> Download results</Button></div>
+        <div className="metric-grid">{[["Arithmetic mean",analysis.arithmetic,"Every gauge has equal weight"],["Thiessen polygon",analysis.thiessen,"Weight depends on polygon area"],["Isohyetal",analysis.isohyetal,"Weight depends on interpolated bands"]].map(([label,value,description],index)=><article className={"metric-card method-"+(index+1)} key={String(label)}><span>{label}</span><strong>{formatNumber(Number(value))}<small> mm</small></strong><p>{description}</p></article>)}</div>
+        <article className="learning-panel"><div className="learning-header"><div><p className="eyebrow">Before versus after</p><h3>Experiment comparison</h3></div><Button variant="outline" onClick={()=>setBaseline(snapshot(analysis,gauges.length))}><Baseline/> Set current as baseline</Button></div>
+          {baseline&&<><div className="comparison-grid"><ComparisonMetric label="Gauge count" current={String(gauges.length)} delta={formatDelta(gauges.length-baseline.gaugeCount,0,"")}/><ComparisonMetric label="Arithmetic" current={formatNumber(analysis.arithmetic)+" mm"} delta={formatDelta(analysis.arithmetic-baseline.arithmetic)}/><ComparisonMetric label="Thiessen" current={formatNumber(analysis.thiessen)+" mm"} delta={formatDelta(analysis.thiessen-baseline.thiessen)}/><ComparisonMetric label="Isohyetal" current={formatNumber(analysis.isohyetal)+" mm"} delta={formatDelta(analysis.isohyetal-baseline.isohyetal)}/></div><div className="learning-explanation"><FlaskConical/><p>{explanation}</p></div></>}
+        </article>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="analysis-tabs"><TabsList><TabsTrigger value="gauges">1. Edit gauge network</TabsTrigger><TabsTrigger value="thiessen">2. View Thiessen</TabsTrigger><TabsTrigger value="isohyetal">3. View isohyetal</TabsTrigger></TabsList>
+          <TabsContent value="gauges"><div className="map-editor"><div className="tool-row" role="toolbar" aria-label="Map editing tools">
+            <button type="button" className={editMode==="move"?"active":""} onClick={()=>chooseTool("move")}><MousePointer2/> Move gauges</button>
+            <button type="button" className={editMode==="add"?"active":""} onClick={()=>chooseTool("add")}><Plus/> Add gauge</button>
+            <button type="button" className={editMode==="draw"?"active":""} onClick={()=>chooseTool("draw")}><Pencil/> Draw watershed</button>
+          </div>
+          <div className="tool-instructions">
+            {editMode==="move"&&<div><MapPin/><p><b>Drag an orange gauge</b> to a new location. Click one to edit rainfall or remove it.</p></div>}
+            {editMode==="add"&&<div><Plus/><p>Set rainfall, then <b>click the map</b>.</p><label>Rainfall <Input type="number" min={0} step={1} value={newRainfall} onChange={(event)=>setNewRainfall(Math.max(0,Number(event.target.value)))}/><span>mm</span></label></div>}
+            {editMode==="draw"&&<div><Map/><p><b>Click each corner</b> of the watershed in order.</p><span className="vertex-count">{drawingVertices.length+" vertices"}</span><Button variant="outline" size="sm" disabled={!drawingVertices.length} onClick={()=>setDrawingVertices((current)=>current.slice(0,-1))}><Undo2/> Undo</Button><Button size="sm" disabled={drawingVertices.length<3} onClick={finishWatershed}><Save/> Finish watershed</Button></div>}
+          </div>
+          {selectedGauge&&editMode==="move"&&<div className="selected-gauge"><div><span>Selected gauge</span><strong>{selectedGauge.station}</strong></div><label>Rainfall <Input type="number" min={0} step={1} value={selectedGauge.rainfall} onChange={(event)=>updateRainfall(Number(event.target.value))}/><span>mm</span></label><Button variant="outline" size="sm" onClick={removeGauge}><Trash2/> Remove gauge</Button></div>}
+          </div><InteractiveMapPanel gauges={gauges} watershed={boundary} analysis={analysis} editMode={editMode} selectedStation={selectedStation} drawingVertices={drawingVertices} onSelectGauge={setSelectedStation} onMoveGauge={moveGauge} onMapClick={handleMapClick}/></TabsContent>
+          <TabsContent value="thiessen"><div className="view-note"><MapPin/><span>Each gauge controls the area closest to it. Moving a gauge changes these weights.</span></div><MapPanel mode="thiessen" gauges={gauges} watershed={boundary} analysis={analysis}/></TabsContent>
+          <TabsContent value="isohyetal"><div className="view-note"><Map/><span>The IDW surface responds to both rainfall values and distance from every gauge.</span></div><MapPanel mode="isohyetal" gauges={gauges} watershed={boundary} analysis={analysis}/></TabsContent>
+        </Tabs>
+        <div className="details-grid"><DataTable title="Thiessen calculation" eyebrow="Area weights" formula="P̄ = Σ(Aᵢ/A)Pᵢ" headings={["Gauge","Rainfall","Area","Weight","Contribution"]} rows={analysis.thiessenRows.map((row)=>[row.station,formatNumber(row.rainfall,1)+" mm",formatNumber(row.areaKm2,2)+" km²",formatNumber(row.fraction*100,1)+"%",formatNumber(row.weighted,2)+" mm"])}/><DataTable title="Isohyetal calculation" eyebrow="Contour bands" formula="P̄ = Σ(Aⱼ/A)P̄ⱼ" headings={["Band","Representative","Area","Weight","Contribution"]} rows={analysis.isohyetRows.map((row)=>[row.lower+"–"+row.upper+" mm",formatNumber(row.representative,1)+" mm",formatNumber(row.areaKm2,2)+" km²",formatNumber(row.fraction*100,1)+"%",formatNumber(row.weighted,2)+" mm"])}/></div>
+        <footer className="analysis-footer"><FlaskConical/><span>Watershed area: <b>{formatNumber(analysis.watershedAreaKm2,2)+" km²"}</b>. Isohyetal areas are grid approximations; report the grid, interval, and IDW power.</span></footer>
+      </>:<div className="error-state"><TriangleAlert/><h2>Analysis could not be completed</h2><p>{analysisResult.error}</p><Button onClick={reset}>Restore sample data</Button></div>}</section>
     </div>
   </main>;
 }
