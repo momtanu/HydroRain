@@ -6,28 +6,11 @@ Students can upload rain-gauge CSV data and a watershed GeoJSON, change the IDW
 and grid settings, inspect maps and intermediate calculations, and download the
 results. Uploaded files remain in the student's browser.
 
-## Publish it on GitHub Pages
+Link:
+https://momtanu.github.io/HydroRain/
 
-1. Sign in to GitHub and create a new **public** repository. `HydroRain` is a
-   good repository name. Do not initialize it with another README.
-2. Extract this ZIP and upload **the contents of this folder** to the repository.
-   Make sure `.github/workflows/deploy-pages.yml` is included.
-3. Open the repository's **Settings → Pages**.
-4. Under **Build and deployment**, set **Source** to **GitHub Actions**.
-5. Open the **Actions** tab and select **Deploy HydroRain to GitHub Pages**.
-   If it is not already running, choose **Run workflow**. When its green check
-   mark appears, the Pages settings screen will show the public address.
 
-The address will normally be:
-
-```text
-https://YOUR-GITHUB-USERNAME.github.io/HydroRain/
-```
-
-You can open that address without a GitHub account and without installing
-anything.
-
-## Expected rain-gauge CSV
+## Expected rain-gauge CSV format
 
 ```csv
 station,latitude,longitude,rainfall_mm
